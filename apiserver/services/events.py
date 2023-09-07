@@ -30,6 +30,7 @@ from apiserver.apimodels.events import (
     GetVariantSampleRequest,
     GetMetricSamplesRequest,
     TaskMetric,
+    MultiTaskPlotsRequest,
 )
 from apiserver.bll.event import EventBLL
 from apiserver.bll.event.event_common import EventType, MetricVariants, TaskCompanies
@@ -70,9 +71,7 @@ def _assert_task_or_model_exists(
 @endpoint("events.add")
 def add(call: APICall, company_id, _):
     data = call.data.copy()
-    added, err_count, err_info = event_bll.add_events(
-        company_id, [data], call.worker
-    )
+    added, err_count, err_info = event_bll.add_events(company_id, [data], call.worker)
     call.result.data = dict(added=added, errors=err_count, errors_info=err_info)
 
 
@@ -255,7 +254,9 @@ def get_vector_metrics_and_variants(call, company_id, _):
     task_id = call.data["task"]
     model_events = call.data["model_events"]
     task_or_model = _assert_task_or_model_exists(
-        company_id, task_id, model_events=model_events,
+        company_id,
+        task_id,
+        model_events=model_events,
     )[0]
     call.result.data = dict(
         metrics=event_bll.get_metrics_and_variants(
@@ -269,7 +270,9 @@ def get_scalar_metrics_and_variants(call, company_id, _):
     task_id = call.data["task"]
     model_events = call.data["model_events"]
     task_or_model = _assert_task_or_model_exists(
-        company_id, task_id, model_events=model_events,
+        company_id,
+        task_id,
+        model_events=model_events,
     )[0]
     call.result.data = dict(
         metrics=event_bll.get_metrics_and_variants(
@@ -287,7 +290,9 @@ def vector_metrics_iter_histogram(call, company_id, _):
     task_id = call.data["task"]
     model_events = call.data["model_events"]
     task_or_model = _assert_task_or_model_exists(
-        company_id, task_id, model_events=model_events,
+        company_id,
+        task_id,
+        model_events=model_events,
     )[0]
     metric = call.data["metric"]
     variant = call.data["variant"]
@@ -320,7 +325,9 @@ def make_response(
 def get_task_events(_, company_id, request: TaskEventsRequest):
     task_id = request.task
     task_or_model = _assert_task_or_model_exists(
-        company_id, task_id, model_events=request.model_events,
+        company_id,
+        task_id,
+        model_events=request.model_events,
     )[0]
 
     key = ScalarKeyEnum.iter
@@ -398,7 +405,9 @@ def get_scalar_metric_data(call, company_id, _):
     model_events = call.data.get("model_events", False)
 
     task_or_model = _assert_task_or_model_exists(
-        company_id, task_id, model_events=model_events,
+        company_id,
+        task_id,
+        model_events=model_events,
     )[0]
     result = event_bll.get_task_events(
         task_or_model.get_index_company(),
@@ -462,13 +471,17 @@ def scalar_metrics_iter_histogram(
 
 
 def _get_task_or_model_index_companies(
-    company_id: str, task_ids: Sequence[str], model_events=False,
+    company_id: str,
+    task_ids: Sequence[str],
+    model_events=False,
 ) -> TaskCompanies:
     """
     Returns lists of tasks grouped by company
     """
     tasks_or_models = _assert_task_or_model_exists(
-        company_id, task_ids, model_events=model_events,
+        company_id,
+        task_ids,
+        model_events=model_events,
     )
 
     unique_ids = set(task_ids)
@@ -507,21 +520,32 @@ def multi_task_scalar_metrics_iter_histogram(
 
 
 def _get_single_value_metrics_response(
-    value_metrics: Mapping[str, dict]
+    companies: TaskCompanies, value_metrics: Mapping[str, dict]
 ) -> Sequence[dict]:
-    return [{"task": task, "values": values} for task, values in value_metrics.items()]
+    task_names = {
+        task.id: task.name for task in itertools.chain.from_iterable(companies.values())
+    }
+    return [
+        {"task": task_id, "task_name": task_names.get(task_id), "values": values}
+        for task_id, values in value_metrics.items()
+    ]
 
 
 @endpoint("events.get_task_single_value_metrics")
 def get_task_single_value_metrics(
     call, company_id: str, request: SingleValueMetricsRequest
 ):
-    res = event_bll.metrics.get_task_single_value_metrics(
-        companies=_get_task_or_model_index_companies(
-            company_id, request.tasks, request.model_events
-        ),
+    companies = _get_task_or_model_index_companies(
+        company_id, request.tasks, request.model_events
     )
-    call.result.data = dict(tasks=_get_single_value_metrics_response(res))
+    call.result.data = dict(
+        tasks=_get_single_value_metrics_response(
+            companies=companies,
+            value_metrics=event_bll.metrics.get_task_single_value_metrics(
+                companies=companies
+            ),
+        )
+    )
 
 
 @endpoint("events.get_multi_task_plots", required_fields=["tasks"])
@@ -560,6 +584,7 @@ def get_multi_task_plots_v1_7(call, company_id, _):
 def _get_multitask_plots(
     companies: TaskCompanies,
     last_iters: int,
+    last_iters_per_task_metric: bool,
     metrics: MetricVariants = None,
     scroll_id=None,
     no_scroll=True,
@@ -576,6 +601,10 @@ def _get_multitask_plots(
         sort=[{"iter": {"order": "desc"}}],
         scroll_id=scroll_id,
         no_scroll=no_scroll,
+        size=config.get(
+            "services.events.events_retrieval.multi_plots_batch_size", 1000
+        ),
+        last_iters_per_task_metric=last_iters_per_task_metric,
     )
     return_events = _get_top_iter_unique_events_per_task(
         result.events, max_iters=last_iters, task_names=task_names
@@ -583,22 +612,17 @@ def _get_multitask_plots(
     return return_events, result.total_events, result.next_scroll_id
 
 
-@endpoint("events.get_multi_task_plots", min_version="1.8", required_fields=["tasks"])
-def get_multi_task_plots(call, company_id, _):
-    task_ids = call.data["tasks"]
-    iters = call.data.get("iters", 1)
-    scroll_id = call.data.get("scroll_id")
-    no_scroll = call.data.get("no_scroll", False)
-    model_events = call.data.get("model_events", False)
-
+@endpoint("events.get_multi_task_plots", min_version="1.8")
+def get_multi_task_plots(call, company_id, request: MultiTaskPlotsRequest):
     companies = _get_task_or_model_index_companies(
-        company_id, task_ids, model_events=model_events
+        company_id, request.tasks, model_events=request.model_events
     )
     return_events, total_events, next_scroll_id = _get_multitask_plots(
         companies=companies,
-        last_iters=iters,
-        scroll_id=scroll_id,
-        no_scroll=no_scroll,
+        last_iters=request.iters,
+        scroll_id=request.scroll_id,
+        no_scroll=request.no_scroll,
+        last_iters_per_task_metric=request.last_iters_per_task_metric,
     )
     call.result.data = dict(
         plots=return_events,
@@ -775,7 +799,9 @@ def get_debug_images_v1_8(call, company_id, _):
     model_events = call.data.get("model_events", False)
 
     tasks_or_model = _assert_task_or_model_exists(
-        company_id, task_id, model_events=model_events,
+        company_id,
+        task_id,
+        model_events=model_events,
     )[0]
     result = event_bll.get_task_events(
         tasks_or_model.get_index_company(),
@@ -831,7 +857,9 @@ def get_debug_images(call, company_id, request: MetricEventsRequest):
 )
 def get_debug_image_sample(call, company_id, request: GetVariantSampleRequest):
     task_or_model = _assert_task_or_model_exists(
-        company_id, request.task, model_events=request.model_events,
+        company_id,
+        request.task,
+        model_events=request.model_events,
     )[0]
     res = event_bll.debug_image_sample_history.get_sample_for_variant(
         company_id=task_or_model.get_index_company(),
@@ -853,7 +881,9 @@ def get_debug_image_sample(call, company_id, request: GetVariantSampleRequest):
 )
 def next_debug_image_sample(call, company_id, request: NextHistorySampleRequest):
     task_or_model = _assert_task_or_model_exists(
-        company_id, request.task, model_events=request.model_events,
+        company_id,
+        request.task,
+        model_events=request.model_events,
     )[0]
     res = event_bll.debug_image_sample_history.get_next_sample(
         company_id=task_or_model.get_index_company(),
@@ -866,11 +896,14 @@ def next_debug_image_sample(call, company_id, request: NextHistorySampleRequest)
 
 
 @endpoint(
-    "events.get_plot_sample", request_data_model=GetMetricSamplesRequest,
+    "events.get_plot_sample",
+    request_data_model=GetMetricSamplesRequest,
 )
 def get_plot_sample(call, company_id, request: GetMetricSamplesRequest):
     task_or_model = _assert_task_or_model_exists(
-        company_id, request.task, model_events=request.model_events,
+        company_id,
+        request.task,
+        model_events=request.model_events,
     )[0]
     res = event_bll.plot_sample_history.get_samples_for_metric(
         company_id=task_or_model.get_index_company(),
@@ -885,11 +918,14 @@ def get_plot_sample(call, company_id, request: GetMetricSamplesRequest):
 
 
 @endpoint(
-    "events.next_plot_sample", request_data_model=NextHistorySampleRequest,
+    "events.next_plot_sample",
+    request_data_model=NextHistorySampleRequest,
 )
 def next_plot_sample(call, company_id, request: NextHistorySampleRequest):
     task_or_model = _assert_task_or_model_exists(
-        company_id, request.task, model_events=request.model_events,
+        company_id,
+        request.task,
+        model_events=request.model_events,
     )[0]
     res = event_bll.plot_sample_history.get_next_sample(
         company_id=task_or_model.get_index_company(),
@@ -904,7 +940,9 @@ def next_plot_sample(call, company_id, request: NextHistorySampleRequest):
 @endpoint("events.get_task_metrics", request_data_model=TaskMetricsRequest)
 def get_task_metrics(call: APICall, company_id, request: TaskMetricsRequest):
     task_or_models = _assert_task_or_model_exists(
-        company_id, request.tasks, model_events=request.model_events,
+        company_id,
+        request.tasks,
+        model_events=request.model_events,
     )
     res = event_bll.metrics.get_task_metrics(
         task_or_models[0].get_index_company(),
@@ -960,12 +998,12 @@ def clear_task_log(call: APICall, company_id: str, request: ClearTaskLogRequest)
 def _get_top_iter_unique_events_per_task(
     events, max_iters: int, task_names: Mapping[str, str]
 ):
-    key = itemgetter("metric", "variant", "task", "iter")
-
+    key_fields = ("metric", "variant", "task")
     unique_events = itertools.chain.from_iterable(
         itertools.islice(group, max_iters)
         for _, group in itertools.groupby(
-            sorted(events, key=key, reverse=True), key=key
+            sorted(events, key=itemgetter(*(key_fields + ("iter",))), reverse=True),
+            key=itemgetter(*key_fields),
         )
     )
 

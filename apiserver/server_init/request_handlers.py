@@ -1,3 +1,5 @@
+import unicodedata
+import urllib.parse
 from functools import partial
 
 from flask import request, Response, redirect
@@ -20,9 +22,6 @@ class RequestHandlers:
     _request_strip_prefix = config.get("apiserver.request.strip_prefix", None)
     _server_header = config.get("apiserver.response.headers.server", "clearml")
 
-    def before_app_first_request(self):
-        pass
-
     def before_request(self):
         if request.method == "OPTIONS":
             return "", 200
@@ -44,9 +43,17 @@ class RequestHandlers:
             else:
                 headers = None
                 if call.result.filename:
-                    headers = {
-                        "Content-Disposition": f"attachment; filename={call.result.filename}"
-                    }
+                    try:
+                        call.result.filename.encode("ascii")
+                    except UnicodeEncodeError:
+                        simple = unicodedata.normalize("NFKD", call.result.filename)
+                        simple = simple.encode("ascii", "ignore").decode("ascii")
+                        # safe = RFC 5987 attr-char
+                        quoted = urllib.parse.quote(call.result.filename, safe="")
+                        filenames = f"filename={simple}; filename*=UTF-8''{quoted}"
+                    else:
+                        filenames = f"filename={call.result.filename}"
+                    headers = {"Content-Disposition": "attachment; " + filenames}
 
                 response = Response(
                     content,

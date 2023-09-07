@@ -14,6 +14,7 @@ from typing import (
     Callable,
     Mapping,
     Any,
+    Union,
 )
 
 from mongoengine import Q, Document
@@ -22,7 +23,7 @@ from apiserver import database
 from apiserver.apierrors import errors
 from apiserver.apimodels.projects import ProjectChildrenType
 from apiserver.config_repo import config
-from apiserver.database.model import EntityVisibility, AttributedDocument
+from apiserver.database.model import EntityVisibility, AttributedDocument, User
 from apiserver.database.model.base import GetMixin
 from apiserver.database.model.model import Model
 from apiserver.database.model.project import Project
@@ -932,7 +933,10 @@ class ProjectBLL:
                 & Q(system_tags__in=[dataset_tag], basename__ne=datasets_project_name)
             }
         elif children_type == ProjectChildrenType.pipeline:
-            child_queries = {Task: child_query & Q(system_tags__in=[pipeline_tag])}
+            child_queries = {
+                Project: child_query
+                & Q(system_tags__in=[pipeline_tag], basename__ne=pipelines_project_name)
+            }
         elif children_type == ProjectChildrenType.report:
             child_queries = {Task: child_query & Q(system_tags__in=[reports_tag])}
         else:
@@ -956,7 +960,7 @@ class ProjectBLL:
         for cls_, query_ in child_queries.items():
             res |= set(
                 cls_.objects(query_).distinct(
-                    field="parent" if cls_ is Project else "project"
+                    field="id" if cls_ is Project else "project"
                 )
             )
 
@@ -973,6 +977,28 @@ class ProjectBLL:
 
         return filtered_ids, selected_project_ids
 
+    @staticmethod
+    def _get_project_query(
+        company: str,
+        projects: Sequence,
+        include_subprojects: bool = True,
+        state: Optional[EntityVisibility] = None,
+    ) -> Q:
+        query = get_company_or_none_constraint(company)
+        if projects:
+            if include_subprojects:
+                projects = _ids_with_children(projects)
+            query &= Q(project__in=projects)
+        else:
+            query &= Q(system_tags__nin=[EntityVisibility.hidden.value])
+
+        if state == EntityVisibility.archived:
+            query &= Q(system_tags__in=[EntityVisibility.archived.value])
+        elif state == EntityVisibility.active:
+            query &= Q(system_tags__nin=[EntityVisibility.archived.value])
+
+        return query
+
     @classmethod
     def get_task_parents(
         cls,
@@ -986,19 +1012,9 @@ class ProjectBLL:
         Get list of unique parent tasks sorted by task name for the passed company projects
         If projects is None or empty then get parents for all the company tasks
         """
-        query = Q(company=company_id)
-
-        if projects:
-            if include_subprojects:
-                projects = _ids_with_children(projects)
-            query &= Q(project__in=projects)
-        else:
-            query &= Q(system_tags__nin=[EntityVisibility.hidden.value])
-
-        if state == EntityVisibility.archived:
-            query &= Q(system_tags__in=[EntityVisibility.archived.value])
-        elif state == EntityVisibility.active:
-            query &= Q(system_tags__nin=[EntityVisibility.archived.value])
+        query = cls._get_project_query(
+            company_id, projects, include_subprojects=include_subprojects, state=state
+        )
 
         parent_ids = set(Task.objects(query).distinct("parent"))
         if not parent_ids:
@@ -1015,17 +1031,29 @@ class ProjectBLL:
         return sorted(parents, key=itemgetter("name"))
 
     @classmethod
+    def get_entity_users(
+        cls,
+        company: str,
+        entity_cls: Type[Union[Task, Model]],
+        projects: Sequence[str],
+        include_subprojects: bool,
+    ) -> Sequence[dict]:
+        query = cls._get_project_query(
+            company, projects, include_subprojects=include_subprojects
+        )
+        user_ids = entity_cls.objects(query).distinct(field="user")
+        if not user_ids:
+            return []
+        users = User.objects(id__in=user_ids).only("id", "name")
+        return [{"id": u.id, "name": u.name} for u in users]
+
+    @classmethod
     def get_task_types(cls, company, project_ids: Optional[Sequence]) -> set:
         """
         Return the list of unique task types used by company and public tasks
         If project ids passed then only tasks from these projects are considered
         """
-        query = get_company_or_none_constraint(company)
-        if project_ids:
-            project_ids = _ids_with_children(project_ids)
-            query &= Q(project__in=project_ids)
-        else:
-            query &= Q(system_tags__nin=[EntityVisibility.hidden.value])
+        query = cls._get_project_query(company, project_ids)
         res = Task.objects(query).distinct(field="type")
         return set(res).intersection(external_task_types)
 
@@ -1035,10 +1063,7 @@ class ProjectBLL:
         Return the list of unique frameworks used by company and public models
         If project ids passed then only models from these projects are considered
         """
-        query = get_company_or_none_constraint(company)
-        if project_ids:
-            project_ids = _ids_with_children(project_ids)
-            query &= Q(project__in=project_ids)
+        query = cls._get_project_query(company, project_ids)
         return Model.objects(query).distinct(field="framework")
 
     @staticmethod
@@ -1059,6 +1084,7 @@ class ProjectBLL:
         if not filter_:
             return conditions
 
+        or_conditions = []
         for field, field_filter in filter_.items():
             if not (
                 field_filter
@@ -1068,12 +1094,31 @@ class ProjectBLL:
                 raise errors.bad_request.ValidationError(
                     f"List of strings expected for the field: {field}"
                 )
-            helper = GetMixin.ListFieldBucketHelper(field, legacy=True)
-            actions = helper.get_actions(field_filter)
-            conditions[field] = {
-                f"${action}": list(set(actions[action]))
-                for action in filter(None, actions)
-            }
+            helper = GetMixin.NewListFieldBucketHelper(
+                field, data=field_filter, legacy=True
+            )
+            field_conditions = {}
+            for action, values in helper.actions.items():
+                value = list(set(values))
+                for key in reversed(action.split("__")):
+                    value = {f"${key}": value}
+                field_conditions.update(value)
+            if (
+                helper.explicit_operator
+                and helper.global_operator == Q.OR
+                and len(field_conditions) > 1
+            ):
+                or_conditions.append(
+                    [{field: {op: cond}} for op, cond in field_conditions.items()]
+                )
+            else:
+                conditions[field] = field_conditions
+
+        if or_conditions:
+            if len(or_conditions) == 1:
+                conditions["$or"] = next(iter(or_conditions))
+            else:
+                conditions["$and"] = [{"$or": c} for c in or_conditions]
 
         return conditions
 

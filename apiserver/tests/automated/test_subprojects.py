@@ -90,6 +90,18 @@ class TestSubProjects(TestService):
         self.assertEqual(p.basename, "project1")
         self.assertEqual(p.stats.active.total_tasks, 1)
 
+        projects = self.api.projects.get_all_ex(
+            parent=[test_root],
+            children_type="report",
+            children_tags=["__$any", "__$not", "test1", "test2"],
+            shallow_search=True,
+            include_stats=True,
+            check_own_contents=True,
+        ).projects
+        self.assertEqual(len(projects), 2)
+        for p in projects:
+            self.assertEqual(p.stats.active.total_tasks, 1)
+
     def test_query_children(self):
         test_root_name = "TestQueryChildren"
         test_root = self._temp_project(name=test_root_name)
@@ -129,9 +141,7 @@ class TestSubProjects(TestService):
         for p in projects:
             self.assertEqual(
                 p.stats.active.total_tasks,
-                2
-                if p.basename in ("Project1", "Project2")
-                else 1
+                2 if p.basename in ("Project1", "Project2") else 1,
             )
 
         for i, type_ in enumerate(("dataset", "pipeline", "report")):
@@ -152,9 +162,7 @@ class TestSubProjects(TestService):
             else:
                 self.assertEqual(p.own_tasks, 0)
                 self.assertIsNone(p.get("own_datasets"))
-                self.assertEqual(
-                    p.stats.active.total_tasks, 1 if p.basename != "Project4" else 0
-                )
+                self.assertEqual(p.stats.active.total_tasks, 1)
 
     def test_project_aggregations(self):
         """This test requires user with user_auth_only... credentials in db"""
@@ -183,6 +191,8 @@ class TestSubProjects(TestService):
         self.assertEqual(res.types, [])
         res = self.api.projects.get_task_parents(projects=[project])
         self.assertEqual(res.parents, [])
+        res = self.api.projects.get_user_names(projects=[project])
+        self.assertEqual(res.users, [])
         res = self.api.organization.get_entities_count(
             projects={"id": [project]}, active_users=[user]
         )
@@ -206,6 +216,8 @@ class TestSubProjects(TestService):
         self.assertEqual(res.projects[0].stats.active.total_tasks, 2)
         res = self.api.projects.get_task_parents(projects=[project])
         self._assert_ids(res.parents, [task1])
+        res = self.api.projects.get_user_names(projects=[project])
+        self.assertEqual(res.users, [{"id": "Test1", "name": "Test User"}])
         res = self.api.models.get_frameworks(projects=[project])
         self.assertEqual(res.frameworks, [framework])
         res = self.api.tasks.get_types(projects=[project])
@@ -337,6 +349,36 @@ class TestSubProjects(TestService):
         res = self.api.projects.get_all_ex(basename="project2").projects
         self.assertEqual([p.id for p in res], [project2])
         self.api.projects.delete(project=project1, force=True)
+
+    def test_include_subprojects(self):
+        project1, _ = self._temp_project_with_tasks(name="project1x")
+        project2, _ = self._temp_project_with_tasks(name="project1x/project22")
+        self._temp_model(project=project1)
+        self._temp_model(project=project2)
+
+        # tasks
+        res = self.api.tasks.get_all_ex(project=project1).tasks
+        self.assertEqual(len(res), 2)
+        res = self.api.tasks.get_all(project=project1).tasks
+        self.assertEqual(len(res), 2)
+        res = self.api.tasks.get_all_ex(
+            project=project1, include_subprojects=True
+        ).tasks
+        self.assertEqual(len(res), 4)
+        res = self.api.tasks.get_all(project=project1, include_subprojects=True).tasks
+        self.assertEqual(len(res), 4)
+
+        # models
+        res = self.api.models.get_all_ex(project=project1).models
+        self.assertEqual(len(res), 1)
+        res = self.api.models.get_all(project=project1).models
+        self.assertEqual(len(res), 1)
+        res = self.api.models.get_all_ex(
+            project=project1, include_subprojects=True
+        ).models
+        self.assertEqual(len(res), 2)
+        res = self.api.models.get_all(project=project1, include_subprojects=True).models
+        self.assertEqual(len(res), 2)
 
     def test_get_all_with_check_own_contents(self):
         project1, _ = self._temp_project_with_tasks(name="project1x")

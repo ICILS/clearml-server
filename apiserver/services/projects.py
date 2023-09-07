@@ -19,6 +19,8 @@ from apiserver.apimodels.projects import (
     ProjectModelMetadataValuesRequest,
     ProjectChildrenType,
     GetUniqueMetricsRequest,
+    ProjectUserNamesRequest,
+    EntityTypeEnum,
 )
 from apiserver.bll.organization import OrgBLL, Tags
 from apiserver.bll.project import ProjectBLL, ProjectQueries
@@ -29,8 +31,9 @@ from apiserver.bll.project.project_cleanup import (
 )
 from apiserver.database.errors import translate_errors_context
 from apiserver.database.model import EntityVisibility
+from apiserver.database.model.model import Model
 from apiserver.database.model.project import Project
-from apiserver.database.model.task.task import TaskType
+from apiserver.database.model.task.task import TaskType, Task
 from apiserver.database.utils import (
     parse_from_call,
     get_company_or_none_constraint,
@@ -353,6 +356,7 @@ def delete(call: APICall, company_id: str, request: DeleteRequest):
         project_id=request.project,
         force=request.force,
         delete_contents=request.delete_contents,
+        delete_external_artifacts=request.delete_external_artifacts,
     )
     _reset_cached_tags(company_id, projects=list(affected_projects))
     call.result.data = {**attr.asdict(res)}
@@ -402,6 +406,8 @@ def get_model_metadata_values(
         key=request.key,
         include_subprojects=request.include_subprojects,
         allow_public=request.allow_public,
+        page=request.page,
+        page_size=request.page_size,
     )
     call.result.data = {
         "total": total,
@@ -446,6 +452,8 @@ def get_hyperparam_values(
         name=request.name,
         include_subprojects=request.include_subprojects,
         allow_public=request.allow_public,
+        page=request.page,
+        page_size=request.page_size,
     )
     call.result.data = {
         "total": total,
@@ -525,5 +533,17 @@ def get_task_parents(
             include_subprojects=request.include_subprojects,
             state=request.tasks_state,
             name=request.task_name,
+        )
+    }
+
+
+@endpoint("projects.get_user_names")
+def get_user_names(call: APICall, company_id: str, request: ProjectUserNamesRequest):
+    call.result.data = {
+        "users": ProjectBLL.get_entity_users(
+            company_id,
+            entity_cls=Model if request.entity == EntityTypeEnum.model else Task,
+            projects=request.projects,
+            include_subprojects=request.include_subprojects,
         )
     }

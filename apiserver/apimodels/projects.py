@@ -1,10 +1,11 @@
-from enum import Enum
+from enum import Enum, auto
 
 from jsonmodels import models, fields
 
 from apiserver.apimodels import ListField, ActualEnumField, DictField
 from apiserver.apimodels.organization import TagsRequest
 from apiserver.database.model import EntityVisibility
+from apiserver.utilities.stringenum import StringEnum
 
 
 class ProjectRequest(models.Base):
@@ -22,6 +23,7 @@ class MoveRequest(ProjectRequest):
 class DeleteRequest(ProjectRequest):
     force = fields.BoolField(default=False)
     delete_contents = fields.BoolField(default=False)
+    delete_external_artifacts = fields.BoolField(default=True)
 
 
 class ProjectOrNoneRequest(models.Base):
@@ -52,15 +54,28 @@ class ProjectTaskParentsRequest(MultiProjectRequest):
     task_name = fields.StringField()
 
 
-class ProjectHyperparamValuesRequest(MultiProjectRequest):
+class EntityTypeEnum(StringEnum):
+    task = auto()
+    model = auto()
+
+
+class ProjectUserNamesRequest(MultiProjectRequest):
+    entity = ActualEnumField(EntityTypeEnum, default=EntityTypeEnum.task)
+
+
+class MultiProjectPagedRequest(MultiProjectRequest):
+    allow_public = fields.BoolField(default=True)
+    page = fields.IntField(default=0)
+    page_size = fields.IntField(default=500)
+
+
+class ProjectHyperparamValuesRequest(MultiProjectPagedRequest):
     section = fields.StringField(required=True)
     name = fields.StringField(required=True)
-    allow_public = fields.BoolField(default=True)
 
 
-class ProjectModelMetadataValuesRequest(MultiProjectRequest):
+class ProjectModelMetadataValuesRequest(MultiProjectPagedRequest):
     key = fields.StringField(required=True)
-    allow_public = fields.BoolField(default=True)
 
 
 class ProjectChildrenType(Enum):

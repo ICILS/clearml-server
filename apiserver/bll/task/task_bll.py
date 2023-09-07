@@ -449,9 +449,9 @@ class TaskBLL:
         return ret
 
     @staticmethod
-    def remove_task_from_all_queues(company_id: str, task: Task) -> int:
-        return Queue.objects(company=company_id, entries__task=task.id).update(
-            pull__entries__task=task.id, last_update=datetime.utcnow()
+    def remove_task_from_all_queues(company_id: str, task_id: str) -> int:
+        return Queue.objects(company=company_id, entries__task=task_id).update(
+            pull__entries__task=task_id, last_update=datetime.utcnow()
         )
 
     @classmethod
@@ -463,6 +463,7 @@ class TaskBLL:
         status_message: str,
         status_reason: str,
         remove_from_all_queues=False,
+        new_status=None,
     ):
         try:
             cls.dequeue(task, company_id, silent_fail=True)
@@ -471,17 +472,18 @@ class TaskBLL:
             pass
 
         if remove_from_all_queues:
-            cls.remove_task_from_all_queues(company_id=company_id, task=task)
+            cls.remove_task_from_all_queues(company_id=company_id, task_id=task.id)
 
         if task.status not in [TaskStatus.queued, TaskStatus.in_progress]:
             return {"updated": 0}
 
         return ChangeStatusRequest(
             task=task,
-            new_status=task.enqueue_status or TaskStatus.created,
+            new_status=new_status or task.enqueue_status or TaskStatus.created,
             status_reason=status_reason,
             status_message=status_message,
             user_id=user_id,
+            force=True,
         ).execute(enqueue_status=None)
 
     @classmethod

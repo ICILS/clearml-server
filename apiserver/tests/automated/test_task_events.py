@@ -14,8 +14,9 @@ from apiserver.tests.automated import TestService
 
 class TestTaskEvents(TestService):
     delete_params = dict(can_fail=True, force=True)
+    default_task_name = "test task events"
 
-    def _temp_task(self, name="test task events"):
+    def _temp_task(self, name=default_task_name):
         task_input = dict(name=name, type="training",)
         return self.create_temp(
             "tasks", delete_paramse=self.delete_params, **task_input
@@ -115,6 +116,7 @@ class TestTaskEvents(TestService):
         self.assertEqual(len(res), 1)
         data = res[0]
         self.assertEqual(data.task, task)
+        self.assertEqual(data.task_name, self.default_task_name)
         self.assertEqual(len(data["values"]), 1)
         value = data["values"][0]
         self.assertEqual(value.metric, metric)
@@ -147,6 +149,7 @@ class TestTaskEvents(TestService):
 
         data = self.api.events.get_task_single_value_metrics(tasks=[task]).tasks[0]
         self.assertEqual(data.task, task)
+        self.assertEqual(data.task_name, self.default_task_name)
         self.assertEqual(len(data["values"]), 1)
         value = data["values"][0]
         self.assertEqual(value.value, new_value)
@@ -481,6 +484,36 @@ class TestTaskEvents(TestService):
                 data["y"][curr],
                 mean(v for v in range(curr * interval, (curr + 1) * interval)),
             )
+
+    def test_multitask_plots(self):
+        task1 = self._temp_task()
+        events = [
+            self._create_task_event("plot", task1, 1, metric="A", variant="AX", plot_str="Task1_1_A_AX"),
+            self._create_task_event("plot", task1, 2, metric="B", variant="BX", plot_str="Task1_2_B_BX"),
+            self._create_task_event("plot", task1, 3, metric="B", variant="BX", plot_str="Task1_3_B_BX"),
+            self._create_task_event("plot", task1, 3, metric="C", variant="CX", plot_str="Task1_3_C_CX"),
+        ]
+        self.send_batch(events)
+        task2 = self._temp_task()
+        events = [
+            self._create_task_event("plot", task2, 1, metric="C", variant="CX", plot_str="Task2_1_C_CX"),
+            self._create_task_event("plot", task2, 2, metric="A", variant="AY", plot_str="Task2_2_A_AY"),
+        ]
+        self.send_batch(events)
+        plots = self.api.events.get_multi_task_plots(tasks=[task1, task2]).plots
+        self.assertEqual(len(plots), 3)
+        self.assertEqual(len(plots.A), 2)
+        self.assertEqual(len(plots.A.AX), 1)
+        self.assertEqual(len(plots.A.AY), 1)
+        self.assertEqual(plots.A.AX[task1]["1"]["plots"][0]["plot_str"], "Task1_1_A_AX")
+        self.assertEqual(plots.A.AY[task2]["2"]["plots"][0]["plot_str"], "Task2_2_A_AY")
+        self.assertEqual(len(plots.B), 1)
+        self.assertEqual(len(plots.B.BX), 1)
+        self.assertEqual(plots.B.BX[task1]["3"]["plots"][0]["plot_str"], "Task1_3_B_BX")
+        self.assertEqual(len(plots.C), 1)
+        self.assertEqual(len(plots.C.CX), 2)
+        self.assertEqual(plots.C.CX[task1]["3"]["plots"][0]["plot_str"], "Task1_3_C_CX")
+        self.assertEqual(plots.C.CX[task2]["1"]["plots"][0]["plot_str"], "Task2_1_C_CX")
 
     def test_task_plots(self):
         task = self._temp_task()

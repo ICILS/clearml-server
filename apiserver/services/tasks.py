@@ -101,7 +101,7 @@ from apiserver.bll.task.task_operations import (
     move_tasks_to_trash,
 )
 from apiserver.bll.task.utils import update_task, get_task_for_update, deleted_prefix
-from apiserver.bll.util import SetFieldsResolver, run_batch_operation
+from apiserver.bll.util import run_batch_operation
 from apiserver.database.errors import translate_errors_context
 from apiserver.database.model import EntityVisibility
 from apiserver.database.model.task.output import Output
@@ -141,29 +141,12 @@ project_bll = ProjectBLL()
 def set_task_status_from_call(
     request: UpdateRequest, company_id: str, user_id: str, new_status=None, **set_fields
 ) -> dict:
-    fields_resolver = SetFieldsResolver(set_fields)
     task = TaskBLL.get_task_with_access(
         request.task,
         company_id=company_id,
-        only=tuple(
-            {"status", "project", "started", "duration"} | fields_resolver.get_names()
-        ),
+        only=("id", "status", "project"),
         requires_write_access=True,
     )
-
-    if "duration" not in fields_resolver.get_names():
-        if new_status == Task.started:
-            fields_resolver.add_fields(min__duration=max(0, task.duration or 0))
-        elif new_status in (
-            TaskStatus.completed,
-            TaskStatus.failed,
-            TaskStatus.stopped,
-        ):
-            fields_resolver.add_fields(
-                duration=int((task.started - datetime.utcnow()).total_seconds())
-                if task.started
-                else 0
-            )
 
     status_reason = request.status_reason
     status_message = request.status_message
@@ -175,7 +158,7 @@ def set_task_status_from_call(
         status_message=status_message,
         force=force,
         user_id=user_id,
-    ).execute(**fields_resolver.get_fields(task))
+    ).execute(**set_fields)
 
 
 @endpoint("tasks.get_by_id", request_data_model=TaskRequest)
@@ -188,13 +171,13 @@ def get_by_id(call: APICall, company_id, req_model: TaskRequest):
     call.result.data = {"task": task_dict}
 
 
-def escape_execution_parameters(call: APICall) -> dict:
-    if not call.data:
-        return call.data
+def escape_execution_parameters(call_data: dict) -> dict:
+    if not call_data:
+        return call_data
 
-    keys = list(call.data)
+    keys = list(call_data)
     call_data = {
-        safe_key: call.data[key] for key, safe_key in zip(keys, escape_paths(keys))
+        safe_key: call_data[key] for key, safe_key in zip(keys, escape_paths(keys))
     }
 
     projection = Task.get_projection(call_data)
@@ -221,9 +204,7 @@ def _hidden_query(data: dict) -> Q:
 @endpoint("tasks.get_all_ex")
 def get_all_ex(call: APICall, company_id, request: GetAllReq):
     conform_tag_fields(call, call.data)
-
-    call_data = escape_execution_parameters(call)
-
+    call_data = escape_execution_parameters(call.data)
     process_include_subprojects(call_data)
     ret_params = {}
     tasks = Task.get_many_with_join(
@@ -240,9 +221,7 @@ def get_all_ex(call: APICall, company_id, request: GetAllReq):
 @endpoint("tasks.get_by_id_ex", required_fields=["id"])
 def get_by_id_ex(call: APICall, company_id, _):
     conform_tag_fields(call, call.data)
-
-    call_data = escape_execution_parameters(call)
-
+    call_data = escape_execution_parameters(call.data)
     tasks = Task.get_many_with_join(
         company=company_id, query_dict=call_data, allow_public=True,
     )
@@ -254,8 +233,8 @@ def get_by_id_ex(call: APICall, company_id, _):
 @endpoint("tasks.get_all", required_fields=[])
 def get_all(call: APICall, company_id, _):
     conform_tag_fields(call, call.data)
-
-    call_data = escape_execution_parameters(call)
+    call_data = escape_execution_parameters(call.data)
+    process_include_subprojects(call_data)
 
     ret_params = {}
     tasks = Task.get_many(
@@ -942,6 +921,7 @@ def dequeue(call: APICall, company_id, request: DequeueRequest):
         status_message=request.status_message,
         status_reason=request.status_reason,
         remove_from_all_queues=request.remove_from_all_queues,
+        new_status=request.new_status,
     )
     call.result.data_model = DequeueResponse(dequeued=dequeued, **res)
 
@@ -958,6 +938,7 @@ def dequeue_many(call: APICall, company_id, request: DequeueManyRequest):
             status_message=request.status_message,
             status_reason=request.status_reason,
             remove_from_all_queues=request.remove_from_all_queues,
+            new_status=request.new_status,
         ),
         ids=request.ids,
     )
@@ -1045,7 +1026,15 @@ def archive(call: APICall, company_id, request: ArchiveRequest):
     tasks = TaskBLL.assert_exists(
         company_id,
         task_ids=request.tasks,
-        only=("id", "execution", "status", "project", "system_tags", "enqueue_status"),
+        only=(
+            "id",
+            "company",
+            "execution",
+            "status",
+            "project",
+            "system_tags",
+            "enqueue_status",
+        ),
     )
     archived = 0
     for task in tasks:
